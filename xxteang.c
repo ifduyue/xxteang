@@ -224,7 +224,6 @@ _parse_rounds(PyObject *obj, void *dst)
  * matched by name and rejected if they collide with a filled slot or are
  * unknown.  Returns 0 on success, -1 on error with an exception set.
  * `funcname` is used in error messages (NULL for the module functions).
- * nspec must be <= 4.
  */
 static int
 _parse_kwargs(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
@@ -298,7 +297,7 @@ _parse_kwargs(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
 }
 
 /*
- * Parse all arguments of the module-level encrypt/decrypt functions.
+ * Parse all arguments of the module-level functions.
  * Returns 0 on success, -1 on error with an exception set.
  */
 static inline int
@@ -735,8 +734,7 @@ xxteang_vectorcall(PyObject *type, PyObject *const *args,
     if (_parse_init_args(args, nargs, kwnames, &key_obj, &padding, &rounds) < 0)
         return NULL;
 
-    /* Allocate a new instance via tp_alloc (not PyObject_New, because it
-     * must be a heap type with the right ob_type). */
+    /* Allocate a new instance via the type's tp_alloc. */
     PyObject *self = ((PyTypeObject *)type)->tp_alloc((PyTypeObject *)type, 0);
     if (self == NULL)
         return NULL;
