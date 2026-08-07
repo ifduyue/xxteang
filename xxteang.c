@@ -85,16 +85,15 @@ static inline void btea(uint32_t *v, int n, uint32_t const key[4], unsigned int 
     }
 }
 
-static Py_ssize_t bytes2longs(const char *in, Py_ssize_t inlen, uint32_t *out, int padding)
+static void bytes2longs(const char *in, Py_ssize_t inlen, uint32_t *out, int padding)
 {
-    Py_ssize_t i;
+    Py_ssize_t i, nwords;
     int pad;
-    const unsigned char *s;
-
-    s = (const unsigned char *)in;
+    const unsigned char *s = (const unsigned char *)in;
+    unsigned char *b = (unsigned char *)out;
 
     /* Fast path: process 4 bytes at a time */
-    Py_ssize_t nwords = inlen >> 2;
+    nwords = inlen >> 2;
     for (i = 0; i < nwords; i++) {
 #if PY_LITTLE_ENDIAN
         memcpy(&out[i], s + 4 * i, 4);
@@ -105,78 +104,62 @@ static Py_ssize_t bytes2longs(const char *in, Py_ssize_t inlen, uint32_t *out, i
 #endif
     }
 
-    /* Handle remaining 0-3 bytes */
+    /*
+     * Copy the remaining 0-3 bytes, then pad to a multiple of 8 bytes.
+     * Every output byte is written exactly once, so the caller does not
+     * need to zero the buffer first.  Padding to 8 bytes also guarantees
+     * the two 32-bit words (8 bytes) that XXTEA requires, so short
+     * inputs need no extra handling.
+     */
     i = nwords << 2;
     for (; i < inlen; i++) {
-        out[i >> 2] |= (uint32_t)s[i] << ((i & 3) << 3);
+        b[i] = s[i];
     }
-
-    /* 8-byte PKCS#7-style padding.  Padding to a multiple of 8 bytes
-     * also guarantees the two 32-bit words (8 bytes) that XXTEA
-     * requires, so no extra hack is needed for short inputs. */
     if (padding) {
         pad = 8 - (inlen & 7);
         for (; i < inlen + pad; i++) {
-            out[i >> 2] |= (uint32_t)pad << ((i & 3) << 3);
+            b[i] = (unsigned char)pad;
         }
     }
-
-    /* Return the number of 32-bit words, rounded up from bytes. */
-    return ((i - 1) >> 2) + 1;
 }
 
 static Py_ssize_t longs2bytes(const uint32_t *in, Py_ssize_t inlen, char *out, int padding)
 {
     Py_ssize_t i, outlen;
     int pad;
-    unsigned char *s;
+    unsigned char *s = (unsigned char *)out;
 
-    s = (unsigned char *)out;
-
+#if PY_LITTLE_ENDIAN
+    /* Little endian: the words are already in the right byte order.
+     * The in-place path (_decrypt_impl) needs no copy at all. */
+    if (in != (const uint32_t *)out) {
+        memcpy(out, in, (size_t)inlen * 4);
+    }
+#else
     /*
-     * In-place path: used by _decrypt_impl where `out` is the same PyBytes
-     * buffer that already holds the uint32_t words.
-     * - Little endian: the byte representation is already correct, nothing to do.
-     * - Big endian: swap each word's bytes.  Read the whole word into a local
-     *   variable before writing any of its bytes, because in and s alias.
+     * Big endian: write each word as little-endian bytes.  Snapshot the
+     * whole word into a local before writing any of its bytes, because
+     * in and out may alias (the in-place decrypt path).
      */
-    if (in == (const uint32_t *)out) {
-#if PY_LITTLE_ENDIAN
-        /* No byte swap needed. */
-#else
-        for (i = 0; i < inlen; i++) {
-            uint32_t word = in[i];
-            s[4 * i] = (unsigned char)(word & 0xFF);
-            s[4 * i + 1] = (unsigned char)((word >> 8) & 0xFF);
-            s[4 * i + 2] = (unsigned char)((word >> 16) & 0xFF);
-            s[4 * i + 3] = (unsigned char)((word >> 24) & 0xFF);
-        }
-#endif
+    for (i = 0; i < inlen; i++) {
+        uint32_t word = in[i];
+        s[4 * i]     = (unsigned char)(word & 0xFF);
+        s[4 * i + 1] = (unsigned char)((word >> 8) & 0xFF);
+        s[4 * i + 2] = (unsigned char)((word >> 16) & 0xFF);
+        s[4 * i + 3] = (unsigned char)((word >> 24) & 0xFF);
     }
-    else {
-        for (i = 0; i < inlen; i++) {
-#if PY_LITTLE_ENDIAN
-            memcpy(s + 4 * i, &in[i], 4);
-#else
-            s[4 * i] = (unsigned char)(in[i] & 0xFF);
-            s[4 * i + 1] = (unsigned char)((in[i] >> 8) & 0xFF);
-            s[4 * i + 2] = (unsigned char)((in[i] >> 16) & 0xFF);
-            s[4 * i + 3] = (unsigned char)((in[i] >> 24) & 0xFF);
 #endif
-        }
-    }
 
     outlen = inlen * 4;
 
     /* 8-byte PKCS#7-style unpadding. */
     if (padding) {
         pad = s[outlen - 1];
-        outlen -= pad;
-
         if (pad < 1 || pad > 8) {
             /* invalid padding */
             return -1;
         }
+        outlen -= pad;
         if (outlen < 0) {
             return -2;
         }
@@ -197,11 +180,32 @@ static Py_ssize_t longs2bytes(const uint32_t *in, Py_ssize_t inlen, char *out, i
  * Module Functions ***********************************************************
  ****************************************************************************/
 
-typedef PyObject *(*xxteang_crypt_func)(const char *, Py_ssize_t,
-                                      const char *, int, unsigned int);
+/*
+ * One keyword argument slot.  `parse` stores the parsed value into `dst`;
+ * a NULL `parse` stores the raw PyObject* into *(PyObject **)dst.
+ * The slot index is also the positional argument index.
+ */
+typedef struct {
+    const char *name;
+    int (*parse)(PyObject *value, void *dst);
+    void *dst;
+} xxteang_kwarg;
 
-static inline int
-_parse_rounds(PyObject *obj, unsigned int *rounds)
+typedef PyObject *(*xxteang_crypt_func)(const char *, Py_ssize_t,
+                                        const char *, int, unsigned int);
+
+static int
+_parse_bool(PyObject *value, void *dst)
+{
+    int res = PyObject_IsTrue(value);
+    if (res < 0)
+        return -1;
+    *(int *)dst = res;
+    return 0;
+}
+
+static int
+_parse_rounds(PyObject *obj, void *dst)
 {
     unsigned long val = PyLong_AsUnsignedLong(obj);
     if (val == (unsigned long)-1 && PyErr_Occurred())
@@ -210,97 +214,122 @@ _parse_rounds(PyObject *obj, unsigned int *rounds)
         PyErr_SetString(PyExc_OverflowError, "rounds value too large");
         return -1;
     }
-    *rounds = (unsigned int)val;
+    *(unsigned int *)dst = (unsigned int)val;
     return 0;
 }
 
 /*
- * Parse all arguments in a single pass.  Returns 0 on success, -1 on error.
+ * Shared argument parser for the module functions and the XXTEA
+ * constructor.  Positional arguments fill spec[0..nargs-1]; keywords are
+ * matched by name and rejected if they collide with a filled slot or are
+ * unknown.  Returns 0 on success, -1 on error with an exception set.
+ * `funcname` is used in error messages (NULL for the module functions).
+ * nspec must be <= 4.
+ */
+static int
+_parse_kwargs(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
+              const char *funcname, const xxteang_kwarg *spec, Py_ssize_t nspec)
+{
+    Py_ssize_t i, j;
+
+    if (nargs > nspec) {
+        if (funcname == NULL) {
+            PyErr_Format(PyExc_TypeError,
+                "function takes at most %zd positional arguments", nspec);
+        }
+        else {
+            PyErr_Format(PyExc_TypeError,
+                "%s() takes at most %zd positional arguments", funcname, nspec);
+        }
+        return -1;
+    }
+
+    /* Positional arguments map to spec[0..nargs-1]. */
+    for (i = 0; i < nargs; i++) {
+        if (spec[i].parse) {
+            if (spec[i].parse(args[i], spec[i].dst) < 0)
+                return -1;
+        }
+        else {
+            *((PyObject **)spec[i].dst) = args[i];
+        }
+    }
+
+    /* Keyword arguments.  Slot j was already filled if j < nargs. */
+    if (kwnames != NULL) {
+        Py_ssize_t nkwargs = PyTuple_GET_SIZE(kwnames);
+        for (i = 0; i < nkwargs; i++) {
+            PyObject *name = PyTuple_GET_ITEM(kwnames, i);
+            PyObject *value = args[nargs + i];
+
+            for (j = 0; j < nspec; j++) {
+                if (PyUnicode_CompareWithASCIIString(name, spec[j].name) == 0)
+                    break;
+            }
+            if (j == nspec) {
+                if (funcname == NULL) {
+                    PyErr_Format(PyExc_TypeError,
+                        "'%U' is an invalid keyword argument", name);
+                }
+                else {
+                    PyErr_Format(PyExc_TypeError,
+                        "'%U' is an invalid keyword argument for %s()",
+                        name, funcname);
+                }
+                return -1;
+            }
+            if (j < nargs) {
+                PyErr_Format(PyExc_TypeError,
+                    "argument '%s' given both as positional and keyword",
+                    spec[j].name);
+                return -1;
+            }
+            if (spec[j].parse) {
+                if (spec[j].parse(value, spec[j].dst) < 0)
+                    return -1;
+            }
+            else {
+                *((PyObject **)spec[j].dst) = value;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Parse all arguments of the module-level encrypt/decrypt functions.
+ * Returns 0 on success, -1 on error with an exception set.
  */
 static inline int
 _parse_args(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
             PyObject **data_obj, PyObject **key_obj,
             int *padding, unsigned int *rounds)
 {
-    int data_set = 0, key_set = 0, padding_set = 0, rounds_set = 0;
+    PyObject *data = NULL, *key = NULL;
+    int pad = 1;
+    unsigned int r = 0;
 
-    *data_obj = *key_obj = NULL;
-    *padding = 1;
-    *rounds = 0;
+    const xxteang_kwarg spec[] = {
+        {"data", NULL, &data},
+        {"key", NULL, &key},
+        {"padding", _parse_bool, &pad},
+        {"rounds", _parse_rounds, &r},
+    };
 
-    /* Positional: data, key */
-    if (nargs > 0) { *data_obj = args[0]; data_set = 1; }
-    if (nargs > 1) { *key_obj  = args[1]; key_set  = 1; }
-
-    if (nargs > 4) {
-        PyErr_SetString(PyExc_TypeError,
-            "function takes at most 4 positional arguments");
+    if (_parse_kwargs(args, nargs, kwnames, NULL, spec, 4) < 0)
         return -1;
-    }
 
-    /* Keyword loop */
-    if (kwnames != NULL) {
-        Py_ssize_t nkwargs = PyTuple_GET_SIZE(kwnames);
-        for (Py_ssize_t i = 0; i < nkwargs; i++) {
-            PyObject *name = PyTuple_GET_ITEM(kwnames, i);
-            PyObject *value = args[nargs + i];
-
-            if (PyUnicode_CompareWithASCIIString(name, "data") == 0) {
-                if (data_set) { PyErr_SetString(PyExc_TypeError,
-                    "argument 'data' given both as positional and keyword");
-                    return -1; }
-                *data_obj = value;
-                data_set = 1;
-            }
-            else if (PyUnicode_CompareWithASCIIString(name, "key") == 0) {
-                if (key_set) { PyErr_SetString(PyExc_TypeError,
-                    "argument 'key' given both as positional and keyword");
-                    return -1; }
-                *key_obj = value;
-                key_set = 1;
-            }
-            else if (PyUnicode_CompareWithASCIIString(name, "padding") == 0) {
-                if (nargs > 2) { PyErr_SetString(PyExc_TypeError,
-                    "argument 'padding' given both as positional and keyword");
-                    return -1; }
-                int res = PyObject_IsTrue(value);
-                if (res < 0) return -1;
-                *padding = res;
-                padding_set = 1;
-            }
-            else if (PyUnicode_CompareWithASCIIString(name, "rounds") == 0) {
-                if (nargs > 3) { PyErr_SetString(PyExc_TypeError,
-                    "argument 'rounds' given both as positional and keyword");
-                    return -1; }
-                if (_parse_rounds(value, rounds) < 0)
-                    return -1;
-                rounds_set = 1;
-            }
-            else {
-                PyErr_Format(PyExc_TypeError,
-                    "'%U' is an invalid keyword argument", name);
-                return -1;
-            }
-        }
-    }
-
-    /* Positional: padding, rounds (only if not set via keyword) */
-    if (nargs > 2 && !padding_set) {
-        int res = PyObject_IsTrue(args[2]);
-        if (res < 0) return -1;
-        *padding = res;
-    }
-    if (nargs > 3 && !rounds_set) {
-        if (_parse_rounds(args[3], rounds) < 0)
-            return -1;
-    }
-
-    if (!*data_obj || !*key_obj) {
-        PyErr_Format(PyExc_TypeError,
+    if (!data || !key) {
+        PyErr_SetString(PyExc_TypeError,
             "function missing required arguments: 'data' and 'key'");
         return -1;
     }
 
+    *data_obj = data;
+    *key_obj = key;
+    *padding = pad;
+    *rounds = r;
     return 0;
 }
 
@@ -314,6 +343,17 @@ _call_one_arg(PyObject *func, PyObject *arg)
     return PyObject_CallOneArg(func, arg);
 }
 
+/* Validate the key buffer length. Returns 0 on success, -1 on error. */
+static inline int
+_check_key_length(const Py_buffer *key)
+{
+    if (key->len != 16) {
+        PyErr_SetString(PyExc_ValueError, "Need a 16-byte key.");
+        return -1;
+    }
+    return 0;
+}
+
 /* Acquire buffers and validate key length. Returns 0 on success, -1 on error. */
 static inline int
 _get_buffers(PyObject *data_obj, PyObject *key_obj,
@@ -325,8 +365,7 @@ _get_buffers(PyObject *data_obj, PyObject *key_obj,
         PyBuffer_Release(data);
         return -1;
     }
-    if (key->len != 16) {
-        PyErr_SetString(PyExc_ValueError, "Need a 16-byte key.");
+    if (_check_key_length(key) < 0) {
         PyBuffer_Release(data);
         PyBuffer_Release(key);
         return -1;
@@ -354,6 +393,15 @@ _call_module_crypt(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
     return retval;
 }
 
+/* Set the shared "bad data length" ValueError. */
+static inline PyObject *
+_raise_bad_length(void)
+{
+    PyErr_SetString(PyExc_ValueError,
+        "Data length must be a multiple of 4 bytes and must not be less than 8 bytes");
+    return NULL;
+}
+
 /*
  * Internal encrypt implementation — takes raw buffers, returns PyBytes or NULL.
  *
@@ -367,9 +415,7 @@ _encrypt_impl(const char *data_buf, Py_ssize_t data_len,
     uint32_t k[4] = {0};
 
     if (!padding && (data_len < 8 || (data_len & 3) != 0)) {
-        PyErr_SetString(PyExc_ValueError,
-            "Data length must be a multiple of 4 bytes and must not be less than 8 bytes");
-        return NULL;
+        return _raise_bad_length();
     }
 
     /* 8-byte PKCS#7 padding rounds up to a multiple of 8 bytes
@@ -387,11 +433,6 @@ _encrypt_impl(const char *data_buf, Py_ssize_t data_len,
     }
 
     uint32_t *d = (uint32_t *)PyBytes_AsString(retval);
-    /*
-     * Zero all output words before OR-ing in leftover bytes / padding.
-     * bytes2longs relies on the buffer being initially zero-filled.
-     */
-    memset(d, 0, (size_t)alen * sizeof(uint32_t));
 
     Py_BEGIN_ALLOW_THREADS
     bytes2longs(data_buf, data_len, d, padding);
@@ -425,10 +466,8 @@ _decrypt_impl(const char *data_buf, Py_ssize_t data_len,
 {
     uint32_t k[4] = {0};
 
-    if (data_len & 3 || data_len < 8) {
-        PyErr_SetString(PyExc_ValueError,
-            "Data length must be a multiple of 4 bytes and must not be less than 8 bytes");
-        return NULL;
+    if ((data_len & 3) != 0 || data_len < 8) {
+        return _raise_bad_length();
     }
 
     Py_ssize_t alen = data_len / 4;
@@ -476,6 +515,7 @@ PyDoc_STRVAR(
 static PyObject *
 xxteang_encrypt(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
 {
+    (void)self;
     return _call_module_crypt(args, nargs, kwnames, _encrypt_impl);
 }
 
@@ -507,6 +547,7 @@ PyDoc_STRVAR(
 static PyObject *
 xxteang_decrypt(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
 {
+    (void)self;
     return _call_module_crypt(args, nargs, kwnames, _decrypt_impl);
 }
 
@@ -548,8 +589,6 @@ xxteang_decrypt_hex(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyO
  * XXTEA Type ****************************************************************
  ****************************************************************************/
 
-
-
 typedef struct {
     PyObject_HEAD
     char key[16];
@@ -571,88 +610,36 @@ _call_object_crypt(xxteang_object *self, PyObject *data, xxteang_crypt_func cryp
 }
 
 /*
- * Manually parse XXTEA(key, padding=True, rounds=0) for both the
- * vectorcall constructor and the legacy tp_init fallback.
+ * Parse XXTEA(key, padding=True, rounds=0) for both the vectorcall
+ * constructor and the legacy tp_init fallback.
  * Returns 0 on success, -1 on error with an exception set.
  */
 static int
 _parse_init_args(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
                  PyObject **key_obj, int *padding, unsigned int *rounds)
 {
-    int key_set = 0;
+    PyObject *key = NULL;
+    int pad = 1;
+    unsigned int r = 0;
 
-    *key_obj = NULL;
-    *padding = 1;
-    *rounds = 0;
+    const xxteang_kwarg spec[] = {
+        {"key", NULL, &key},
+        {"padding", _parse_bool, &pad},
+        {"rounds", _parse_rounds, &r},
+    };
 
-    if (nargs > 3) {
-        PyErr_SetString(PyExc_TypeError,
-            "XXTEA() takes at most 3 positional arguments");
+    if (_parse_kwargs(args, nargs, kwnames, "XXTEA", spec, 3) < 0)
         return -1;
-    }
 
-    /* Positional: key, [padding], [rounds] */
-    if (nargs > 0) { *key_obj = args[0]; key_set = 1; }
-
-    /* Keyword loop */
-    if (kwnames != NULL) {
-        Py_ssize_t nkwargs = PyTuple_GET_SIZE(kwnames);
-        for (Py_ssize_t i = 0; i < nkwargs; i++) {
-            PyObject *name = PyTuple_GET_ITEM(kwnames, i);
-            PyObject *value = args[nargs + i];
-
-            if (PyUnicode_CompareWithASCIIString(name, "key") == 0) {
-                if (key_set) {
-                    PyErr_SetString(PyExc_TypeError,
-                        "argument 'key' given both as positional and keyword");
-                    return -1;
-                }
-                *key_obj = value;
-                key_set = 1;
-            }
-            else if (PyUnicode_CompareWithASCIIString(name, "padding") == 0) {
-                if (nargs > 1) {
-                    PyErr_SetString(PyExc_TypeError,
-                        "argument 'padding' given both as positional and keyword");
-                    return -1;
-                }
-                int res = PyObject_IsTrue(value);
-                if (res < 0) return -1;
-                *padding = res;
-            }
-            else if (PyUnicode_CompareWithASCIIString(name, "rounds") == 0) {
-                if (nargs > 2) {
-                    PyErr_SetString(PyExc_TypeError,
-                        "argument 'rounds' given both as positional and keyword");
-                    return -1;
-                }
-                if (_parse_rounds(value, rounds) < 0)
-                    return -1;
-            }
-            else {
-                PyErr_Format(PyExc_TypeError,
-                    "'%U' is an invalid keyword argument for XXTEA()", name);
-                return -1;
-            }
-        }
-    }
-
-    /* Positional: padding, rounds (keyword conflicts already caught above) */
-    if (nargs > 1) {
-        int res = PyObject_IsTrue(args[1]);
-        if (res < 0) return -1;
-        *padding = res;
-    }
-    if (nargs > 2) {
-        if (_parse_rounds(args[2], rounds) < 0)
-            return -1;
-    }
-
-    if (!*key_obj) {
+    if (key == NULL) {
         PyErr_SetString(PyExc_TypeError,
             "XXTEA() missing required argument: 'key'");
         return -1;
     }
+
+    *key_obj = key;
+    *padding = pad;
+    *rounds = r;
     return 0;
 }
 
@@ -668,8 +655,7 @@ _apply_init_args(xxteang_object *self, PyObject *key_obj, int padding, unsigned 
     if (PyObject_GetBuffer(key_obj, &key_buf, PyBUF_SIMPLE) < 0)
         return -1;
 
-    if (key_buf.len != 16) {
-        PyErr_SetString(PyExc_ValueError, "Need a 16-byte key.");
+    if (_check_key_length(&key_buf) < 0) {
         PyBuffer_Release(&key_buf);
         return -1;
     }
@@ -853,6 +839,22 @@ static PyType_Spec xxteang_type_spec = {
  * Module Init ****************************************************************
  ****************************************************************************/
 
+PyDoc_STRVAR(
+    xxteang_doc,
+    "xxteang is a simple block cipher (XXTEA) implemented as a C extension.\n"
+    "\n"
+    "Functions:\n"
+    "    encrypt(data, key, padding=True, rounds=0)\n"
+    "    decrypt(data, key, padding=True, rounds=0)\n"
+    "    encrypt_hex(data, key, padding=True, rounds=0)\n"
+    "    decrypt_hex(data, key, padding=True, rounds=0)\n"
+    "\n"
+    "Type:\n"
+    "    XXTEA(key, padding=True, rounds=0)  -- reusable cipher object\n"
+    "\n"
+    "Constants:\n"
+    "    VERSION  -- version string of this module");
+
 static int _exec(PyObject *module)
 {
     xxteang_mod_state *state = (xxteang_mod_state*)PyModule_GetState(module);
@@ -897,6 +899,8 @@ static int _exec(PyObject *module)
      */
     ((PyTypeObject *)xxteang_type)->tp_flags |= Py_TPFLAGS_HAVE_VECTORCALL;
     ((PyTypeObject *)xxteang_type)->tp_vectorcall = xxteang_vectorcall;
+#else
+#error "xxteang requires Python >= 3.9"
 #endif
 
     if (PyDict_SetItemString(PyModule_GetDict(module), "XXTEA", xxteang_type) < 0) {
@@ -960,7 +964,7 @@ static void _free(void *module)
 static struct PyModuleDef moduledef = {
     .m_base     = PyModuleDef_HEAD_INIT,
     .m_name     = "xxteang",
-    .m_doc      = NULL,
+    .m_doc      = xxteang_doc,
     .m_size     = sizeof(struct xxteang_mod_state),
     .m_methods  = methods,
     .m_slots    = slots,
