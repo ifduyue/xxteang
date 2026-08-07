@@ -1,5 +1,5 @@
 import unittest
-import xxtea
+import xxteang
 
 
 class TestBigEndianInPlaceLongs2Bytes(unittest.TestCase):
@@ -22,16 +22,16 @@ class TestBigEndianInPlaceLongs2Bytes(unittest.TestCase):
             0x88, 0x99, 0xaa, 0xbb,  # word 2
             0xcc, 0xdd, 0xee, 0xff,  # word 3
         ])
-        enc = xxtea.encrypt(data, key)
-        dec = xxtea.decrypt(enc, key)
+        enc = xxteang.encrypt(data, key)
+        dec = xxteang.decrypt(enc, key)
         self.assertEqual(dec, data)
 
     def test_decrypt_mixed_lengths(self):
         key = b'0123456789abcdef'
         for length in range(0, 256):
             data = bytes((i * 7 + 13) & 0xff for i in range(length))
-            enc = xxtea.encrypt(data, key)
-            dec = xxtea.decrypt(enc, key)
+            enc = xxteang.encrypt(data, key)
+            dec = xxteang.decrypt(enc, key)
             self.assertEqual(dec, data, f'failed for length={length}')
 
 

@@ -2,7 +2,7 @@ from __future__ import print_function
 import os
 import sys
 import timeit
-import xxtea
+import xxteang
 
 
 if __name__ == '__main__':
@@ -16,17 +16,18 @@ if __name__ == '__main__':
     testkey = os.urandom(16)
     testdata = os.urandom(length)
 
-    t = timeit.Timer('encrypt({}, {})'.format(repr(testdata), repr(testkey)), 'from xxtea import encrypt')
+    t = timeit.Timer('encrypt({}, {})'.format(repr(testdata), repr(testkey)), 'from xxteang import encrypt')
     print('    encrypt:', t.timeit(times))
 
-    testdata = xxtea.encrypt(testdata, testkey)
-    t = timeit.Timer('decrypt({}, {})'.format(repr(testdata), repr(testkey)), 'from xxtea import decrypt')
+    testdata = xxteang.encrypt(testdata, testkey)
+    t = timeit.Timer('decrypt({}, {})'.format(repr(testdata), repr(testkey)), 'from xxteang import decrypt')
     print('    decrypt:', t.timeit(times))
 
-    t = timeit.Timer('encrypt_hex({}, {})'.format(repr(testdata), repr(testkey)), 'from xxtea import encrypt_hex')
+    testdata = os.urandom(length)
+    t = timeit.Timer('encrypt_hex({}, {})'.format(repr(testdata), repr(testkey)), 'from xxteang import encrypt_hex')
     print('encrypt_hex:', t.timeit(times))
 
-    testdata = xxtea.encrypt_hex(testdata, testkey)
-    t = timeit.Timer('decrypt_hex({}, {})'.format(repr(testdata), repr(testkey)), 'from xxtea import decrypt_hex')
+    testdata = xxteang.encrypt_hex(testdata, testkey)
+    t = timeit.Timer('decrypt_hex({}, {})'.format(repr(testdata), repr(testkey)), 'from xxteang import decrypt_hex')
     print('decrypt_hex:', t.timeit(times))
 

@@ -1,4 +1,4 @@
 include README.rst
-include xxtea.c
+include xxteang.c
 include LICENSE
 include pyproject.toml

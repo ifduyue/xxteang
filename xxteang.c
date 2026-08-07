@@ -29,15 +29,15 @@
 #include <stdint.h>
 #include <string.h>
 
-#define VERSION "5.3.2"
+#define VERSION "1.0.0.dev0"
 
 #define DELTA 0x9e3779b9U
 #define MX (((z>>5^y<<2) + (y>>3^z<<4)) ^ ((sum^y) + (key[(p&3)^e] ^ z)))
 
-typedef struct xxtea_mod_state {
+typedef struct xxteang_mod_state {
     PyObject *binascii_hexlify;
     PyObject *binascii_unhexlify;
-} xxtea_mod_state;
+} xxteang_mod_state;
 
 static inline void btea(uint32_t *v, int n, uint32_t const key[4], unsigned int rounds)
 {
@@ -111,11 +111,11 @@ static Py_ssize_t bytes2longs(const char *in, Py_ssize_t inlen, uint32_t *out, i
         out[i >> 2] |= (uint32_t)s[i] << ((i & 3) << 3);
     }
 
-    /* 4-byte PKCS#7-style padding; short inputs are padded to two words. */
+    /* 8-byte PKCS#7-style padding.  Padding to a multiple of 8 bytes
+     * also guarantees the two 32-bit words (8 bytes) that XXTEA
+     * requires, so no extra hack is needed for short inputs. */
     if (padding) {
-        pad = 4 - (inlen & 3);
-        /* Ensure XXTEA always has at least two 32-bit words. */
-        pad = (inlen < 4) ? pad + 4 : pad;
+        pad = 8 - (inlen & 7);
         for (; i < inlen + pad; i++) {
             out[i >> 2] |= (uint32_t)pad << ((i & 3) << 3);
         }
@@ -168,7 +168,7 @@ static Py_ssize_t longs2bytes(const uint32_t *in, Py_ssize_t inlen, char *out, i
 
     outlen = inlen * 4;
 
-    /* 4-byte PKCS#7-style unpadding. */
+    /* 8-byte PKCS#7-style unpadding. */
     if (padding) {
         pad = s[outlen - 1];
         outlen -= pad;
@@ -177,11 +177,9 @@ static Py_ssize_t longs2bytes(const uint32_t *in, Py_ssize_t inlen, char *out, i
             /* invalid padding */
             return -1;
         }
-
         if (outlen < 0) {
             return -2;
         }
-
         for (i = outlen; i < inlen * 4; i++) {
             if (s[i] != pad) {
                 return -3;
@@ -199,7 +197,7 @@ static Py_ssize_t longs2bytes(const uint32_t *in, Py_ssize_t inlen, char *out, i
  * Module Functions ***********************************************************
  ****************************************************************************/
 
-typedef PyObject *(*xxtea_crypt_func)(const char *, Py_ssize_t,
+typedef PyObject *(*xxteang_crypt_func)(const char *, Py_ssize_t,
                                       const char *, int, unsigned int);
 
 static inline int
@@ -338,7 +336,7 @@ _get_buffers(PyObject *data_obj, PyObject *key_obj,
 
 static inline PyObject *
 _call_module_crypt(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
-                   xxtea_crypt_func crypt)
+                   xxteang_crypt_func crypt)
 {
     Py_buffer data = {NULL}, key = {NULL};
     PyObject *data_obj, *key_obj;
@@ -374,7 +372,10 @@ _encrypt_impl(const char *data_buf, Py_ssize_t data_len,
         return NULL;
     }
 
-    Py_ssize_t alen = data_len < 4 ? 2 : (data_len >> 2) + padding;
+    /* 8-byte PKCS#7 padding rounds up to a multiple of 8 bytes
+     * (i.e. an even number of 32-bit words), so the word count is
+     * ((data_len >> 3) + 1) * 2. */
+    Py_ssize_t alen = padding ? ((data_len >> 3) + 1) * 2 : (data_len >> 2);
     if (alen > INT_MAX) {
         PyErr_SetString(PyExc_OverflowError, "data too large");
         return NULL;
@@ -468,30 +469,30 @@ _decrypt_impl(const char *data_buf, Py_ssize_t data_len,
 
 
 PyDoc_STRVAR(
-    xxtea_encrypt_doc,
+    xxteang_encrypt_doc,
     "encrypt(data, key, padding=True, rounds=0)\n\n"
     "Encrypt bytes-like data with a 16-byte key and return bytes.");
 
 static PyObject *
-xxtea_encrypt(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+xxteang_encrypt(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
 {
     return _call_module_crypt(args, nargs, kwnames, _encrypt_impl);
 }
 
 
 PyDoc_STRVAR(
-    xxtea_encrypt_hex_doc,
+    xxteang_encrypt_hex_doc,
     "encrypt_hex(data, key, padding=True, rounds=0)\n\n"
     "Encrypt bytes-like data with a 16-byte key and return hex-encoded bytes.");
 
 static PyObject *
-xxtea_encrypt_hex(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+xxteang_encrypt_hex(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
 {
     PyObject *tmp = _call_module_crypt(args, nargs, kwnames, _encrypt_impl);
     if (!tmp)
         return NULL;
 
-    xxtea_mod_state *state = (xxtea_mod_state*)PyModule_GetState(self);
+    xxteang_mod_state *state = (xxteang_mod_state*)PyModule_GetState(self);
     PyObject *retval = _call_one_arg(state ? state->binascii_hexlify : NULL, tmp);
     Py_DECREF(tmp);
     return retval;
@@ -499,24 +500,24 @@ xxtea_encrypt_hex(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObj
 
 
 PyDoc_STRVAR(
-    xxtea_decrypt_doc,
+    xxteang_decrypt_doc,
     "decrypt(data, key, padding=True, rounds=0)\n\n"
     "Decrypt bytes-like data with a 16-byte key and return bytes.");
 
 static PyObject *
-xxtea_decrypt(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+xxteang_decrypt(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
 {
     return _call_module_crypt(args, nargs, kwnames, _decrypt_impl);
 }
 
 
 PyDoc_STRVAR(
-    xxtea_decrypt_hex_doc,
+    xxteang_decrypt_hex_doc,
     "decrypt_hex(data, key, padding=True, rounds=0)\n\n"
     "Decrypt hex-encoded data with a 16-byte key and return bytes.");
 
 static PyObject *
-xxtea_decrypt_hex(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+xxteang_decrypt_hex(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
 {
     Py_buffer data = {NULL}, key = {NULL};
     PyObject *data_obj, *key_obj;
@@ -526,7 +527,7 @@ xxtea_decrypt_hex(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObj
     if (_parse_args(args, nargs, kwnames, &data_obj, &key_obj, &padding, &rounds) < 0)
         return NULL;
 
-    xxtea_mod_state *state = (xxtea_mod_state*)PyModule_GetState(self);
+    xxteang_mod_state *state = (xxteang_mod_state*)PyModule_GetState(self);
     PyObject *tmp = _call_one_arg(state ? state->binascii_unhexlify : NULL, data_obj);
     if (!tmp)
         return NULL;
@@ -554,10 +555,10 @@ typedef struct {
     char key[16];
     unsigned int rounds;
     int padding;
-} xxtea_object;
+} xxteang_object;
 
 static PyObject *
-_call_object_crypt(xxtea_object *self, PyObject *data, xxtea_crypt_func crypt)
+_call_object_crypt(xxteang_object *self, PyObject *data, xxteang_crypt_func crypt)
 {
     Py_buffer data_buf = {NULL};
     if (PyObject_GetBuffer(data, &data_buf, PyBUF_SIMPLE) < 0)
@@ -656,11 +657,11 @@ _parse_init_args(PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames,
 }
 
 /*
- * Apply parsed key/padding/rounds to a fresh xxtea_object.
+ * Apply parsed key/padding/rounds to a fresh xxteang_object.
  * Returns 0 on success, -1 on error with an exception set.
  */
 static int
-_apply_init_args(xxtea_object *self, PyObject *key_obj, int padding, unsigned int rounds)
+_apply_init_args(xxteang_object *self, PyObject *key_obj, int padding, unsigned int rounds)
 {
     Py_buffer key_buf = {NULL};
 
@@ -686,7 +687,7 @@ _apply_init_args(xxtea_object *self, PyObject *key_obj, int padding, unsigned in
  * of the argument-parsing logic.
  */
 static int
-xxtea_object_init(xxtea_object *self, PyObject *args, PyObject *kwargs)
+xxteang_object_init(xxteang_object *self, PyObject *args, PyObject *kwargs)
 {
     PyObject *key_obj = NULL;
     int padding = 1;
@@ -737,7 +738,7 @@ xxtea_object_init(xxtea_object *self, PyObject *args, PyObject *kwargs)
 
 /* Vectorcall constructor for XXTEA(key, ...). */
 static PyObject *
-xxtea_vectorcall(PyObject *type, PyObject *const *args,
+xxteang_vectorcall(PyObject *type, PyObject *const *args,
                  size_t nargsf, PyObject *kwnames)
 {
     PyObject *key_obj = NULL;
@@ -754,7 +755,7 @@ xxtea_vectorcall(PyObject *type, PyObject *const *args,
     if (self == NULL)
         return NULL;
 
-    if (_apply_init_args((xxtea_object *)self, key_obj, padding, rounds) < 0) {
+    if (_apply_init_args((xxteang_object *)self, key_obj, padding, rounds) < 0) {
         Py_DECREF(self);
         return NULL;
     }
@@ -762,7 +763,7 @@ xxtea_vectorcall(PyObject *type, PyObject *const *args,
 }
 
 static void
-xxtea_object_dealloc(xxtea_object *self)
+xxteang_object_dealloc(xxteang_object *self)
 {
     PyTypeObject *tp = Py_TYPE(self);
     tp->tp_free((PyObject *)self);
@@ -770,34 +771,34 @@ xxtea_object_dealloc(xxtea_object *self)
 }
 
 static PyObject *
-xxtea_object_encrypt(xxtea_object *self, PyObject *data)
+xxteang_object_encrypt(xxteang_object *self, PyObject *data)
 {
     return _call_object_crypt(self, data, _encrypt_impl);
 }
 
 static PyObject *
-xxtea_object_decrypt(xxtea_object *self, PyObject *data)
+xxteang_object_decrypt(xxteang_object *self, PyObject *data)
 {
     return _call_object_crypt(self, data, _decrypt_impl);
 }
 
 static PyObject *
-xxtea_object_encrypt_hex(xxtea_object *self, PyObject *data)
+xxteang_object_encrypt_hex(xxteang_object *self, PyObject *data)
 {
     PyObject *tmp = _call_object_crypt(self, data, _encrypt_impl);
     if (!tmp)
         return NULL;
 
-    xxtea_mod_state *state = PyType_GetModuleState(Py_TYPE(self));
+    xxteang_mod_state *state = PyType_GetModuleState(Py_TYPE(self));
     PyObject *retval = _call_one_arg(state ? state->binascii_hexlify : NULL, tmp);
     Py_DECREF(tmp);
     return retval;
 }
 
 static PyObject *
-xxtea_object_decrypt_hex(xxtea_object *self, PyObject *data)
+xxteang_object_decrypt_hex(xxteang_object *self, PyObject *data)
 {
-    xxtea_mod_state *state = PyType_GetModuleState(Py_TYPE(self));
+    xxteang_mod_state *state = PyType_GetModuleState(Py_TYPE(self));
     PyObject *tmp = _call_one_arg(state ? state->binascii_unhexlify : NULL, data);
     if (!tmp)
         return NULL;
@@ -807,45 +808,45 @@ xxtea_object_decrypt_hex(xxtea_object *self, PyObject *data)
     return retval;
 }
 
-static PyMethodDef xxtea_object_methods[] = {
-    {"encrypt", (PyCFunction)xxtea_object_encrypt, METH_O,
+static PyMethodDef xxteang_object_methods[] = {
+    {"encrypt", (PyCFunction)xxteang_object_encrypt, METH_O,
      "encrypt(data)\n\n"
      "Encrypt data with the stored key, padding, and rounds."},
-    {"decrypt", (PyCFunction)xxtea_object_decrypt, METH_O,
+    {"decrypt", (PyCFunction)xxteang_object_decrypt, METH_O,
      "decrypt(data)\n\n"
      "Decrypt data with the stored key, padding, and rounds."},
-    {"encrypt_hex", (PyCFunction)xxtea_object_encrypt_hex, METH_O,
+    {"encrypt_hex", (PyCFunction)xxteang_object_encrypt_hex, METH_O,
      "encrypt_hex(data)\n\n"
      "Encrypt data and return hex-encoded bytes."},
-    {"decrypt_hex", (PyCFunction)xxtea_object_decrypt_hex, METH_O,
+    {"decrypt_hex", (PyCFunction)xxteang_object_decrypt_hex, METH_O,
      "decrypt_hex(data)\n\n"
      "Decrypt hex-encoded data and return original bytes."},
     {NULL, NULL, 0, NULL}
 };
 
 
-static PyType_Slot xxtea_type_slots[] = {
-    {Py_tp_dealloc, (void *)xxtea_object_dealloc},
+static PyType_Slot xxteang_type_slots[] = {
+    {Py_tp_dealloc, (void *)xxteang_object_dealloc},
     {Py_tp_doc, (void *)"XXTEA(key, padding=True, rounds=0)\n\n"
                 "XXTEA cipher object.  rounds=0 means auto: 6 + 52 / n, "
                 "where n is the number of 32-bit words in the data.\n"
                 "Methods: encrypt(data), decrypt(data), "
                 "encrypt_hex(data), decrypt_hex(data)."},
-    {Py_tp_methods, xxtea_object_methods},
-    {Py_tp_init, (void *)xxtea_object_init},
+    {Py_tp_methods, xxteang_object_methods},
+    {Py_tp_init, (void *)xxteang_object_init},
     {Py_tp_new, PyType_GenericNew},
     {0, NULL}
 };
 
-static PyType_Spec xxtea_type_spec = {
-    .name = "xxtea.XXTEA",
-    .basicsize = sizeof(xxtea_object),
+static PyType_Spec xxteang_type_spec = {
+    .name = "xxteang.XXTEA",
+    .basicsize = sizeof(xxteang_object),
     .flags = Py_TPFLAGS_DEFAULT
 #if PY_VERSION_HEX >= 0x030c0000
            | Py_TPFLAGS_IMMUTABLETYPE
 #endif
            ,
-    .slots = xxtea_type_slots,
+    .slots = xxteang_type_slots,
 };
 
 /*****************************************************************************
@@ -854,7 +855,7 @@ static PyType_Spec xxtea_type_spec = {
 
 static int _exec(PyObject *module)
 {
-    xxtea_mod_state *state = (xxtea_mod_state*)PyModule_GetState(module);
+    xxteang_mod_state *state = (xxteang_mod_state*)PyModule_GetState(module);
     if (state == NULL)
         return -1;
 
@@ -880,37 +881,38 @@ static int _exec(PyObject *module)
     if (PyModule_AddStringConstant(module, "VERSION", VERSION) < 0)
         return -1;
 
-    PyObject *xxtea_type = PyType_FromModuleAndSpec(module, &xxtea_type_spec, NULL);
-    if (xxtea_type == NULL)
+    PyObject *xxteang_type = PyType_FromModuleAndSpec(module, &xxteang_type_spec, NULL);
+    if (xxteang_type == NULL)
         return -1;
 
 #if PY_VERSION_HEX >= 0x03090000
     /*
-     * Hook up the vectorcall constructor.  PyType_Type.tp_vectorcall_offset
-     * points to tp_vectorcall in PyTypeObject (since 3.9), so
-     * _PyVectorcall_Function reads xxtea_type->tp_vectorcall directly.
+     * Hook up the vectorcall constructor.  Since 3.9, PyType_Type sets its
+     * tp_vectorcall_offset to the offset of tp_vectorcall within
+     * PyTypeObject, so _PyVectorcall_Function reads xxteang_type->tp_vectorcall
+     * directly.
      *
      * The flag is set here (not in PyType_Spec) to avoid a 3.12+
      * debug-build assertion on heap types without tp_vectorcall_offset.
      */
-    ((PyTypeObject *)xxtea_type)->tp_flags |= Py_TPFLAGS_HAVE_VECTORCALL;
-    ((PyTypeObject *)xxtea_type)->tp_vectorcall = xxtea_vectorcall;
+    ((PyTypeObject *)xxteang_type)->tp_flags |= Py_TPFLAGS_HAVE_VECTORCALL;
+    ((PyTypeObject *)xxteang_type)->tp_vectorcall = xxteang_vectorcall;
 #endif
 
-    if (PyDict_SetItemString(PyModule_GetDict(module), "XXTEA", xxtea_type) < 0) {
-        Py_DECREF(xxtea_type);
+    if (PyDict_SetItemString(PyModule_GetDict(module), "XXTEA", xxteang_type) < 0) {
+        Py_DECREF(xxteang_type);
         return -1;
     }
-    Py_DECREF(xxtea_type);
+    Py_DECREF(xxteang_type);
 
     return 0;
 }
 
 static PyMethodDef methods[] = {
-    {"encrypt", (PyCFunction)xxtea_encrypt, METH_FASTCALL | METH_KEYWORDS, xxtea_encrypt_doc},
-    {"decrypt", (PyCFunction)xxtea_decrypt, METH_FASTCALL | METH_KEYWORDS, xxtea_decrypt_doc},
-    {"encrypt_hex", (PyCFunction)xxtea_encrypt_hex, METH_FASTCALL | METH_KEYWORDS, xxtea_encrypt_hex_doc},
-    {"decrypt_hex", (PyCFunction)xxtea_decrypt_hex, METH_FASTCALL | METH_KEYWORDS, xxtea_decrypt_hex_doc},
+    {"encrypt", (PyCFunction)xxteang_encrypt, METH_FASTCALL | METH_KEYWORDS, xxteang_encrypt_doc},
+    {"decrypt", (PyCFunction)xxteang_decrypt, METH_FASTCALL | METH_KEYWORDS, xxteang_decrypt_doc},
+    {"encrypt_hex", (PyCFunction)xxteang_encrypt_hex, METH_FASTCALL | METH_KEYWORDS, xxteang_encrypt_hex_doc},
+    {"decrypt_hex", (PyCFunction)xxteang_decrypt_hex, METH_FASTCALL | METH_KEYWORDS, xxteang_decrypt_hex_doc},
     {NULL, NULL, 0, NULL}
 };
 
@@ -932,7 +934,7 @@ static PyModuleDef_Slot slots[] = {
 
 static int _traverse(PyObject *module, visitproc visit, void *arg)
 {
-    xxtea_mod_state *state = (xxtea_mod_state*)PyModule_GetState(module);
+    xxteang_mod_state *state = (xxteang_mod_state*)PyModule_GetState(module);
     if (state) {
         Py_VISIT(state->binascii_hexlify);
         Py_VISIT(state->binascii_unhexlify);
@@ -942,7 +944,7 @@ static int _traverse(PyObject *module, visitproc visit, void *arg)
 
 static int _clear(PyObject *module)
 {
-    xxtea_mod_state *state = (xxtea_mod_state*)PyModule_GetState(module);
+    xxteang_mod_state *state = (xxteang_mod_state*)PyModule_GetState(module);
     if (state) {
         Py_CLEAR(state->binascii_hexlify);
         Py_CLEAR(state->binascii_unhexlify);
@@ -957,9 +959,9 @@ static void _free(void *module)
 
 static struct PyModuleDef moduledef = {
     .m_base     = PyModuleDef_HEAD_INIT,
-    .m_name     = "xxtea",
+    .m_name     = "xxteang",
     .m_doc      = NULL,
-    .m_size     = sizeof(struct xxtea_mod_state),
+    .m_size     = sizeof(struct xxteang_mod_state),
     .m_methods  = methods,
     .m_slots    = slots,
     .m_traverse = _traverse,
@@ -967,7 +969,7 @@ static struct PyModuleDef moduledef = {
     .m_free     = _free,
 };
 
-PyMODINIT_FUNC PyInit_xxtea(void)
+PyMODINIT_FUNC PyInit_xxteang(void)
 {
     return PyModuleDef_Init(&moduledef);
 }

@@ -1,23 +1,23 @@
 from setuptools import setup, Extension
 
-with open("xxtea.c") as f:
+with open("xxteang.c") as f:
     for line in f:
         if line.startswith("#define VERSION "):
             VERSION = eval(line.rsplit(None, 1)[-1])
 
-extension = Extension("xxtea", ["xxtea.c"])
+extension = Extension("xxteang", ["xxteang.c"])
 
 setup(
-    name="xxtea",
+    name="xxteang",
     version=VERSION,
     author="Yue Du",
     author_email="ifduyue@gmail.com",
-    url="https://github.com/ifduyue/xxtea",
-    description="xxtea is a simple block cipher",
+    url="https://github.com/ifduyue/xxteang",
+    description="xxteang is a simple block cipher",
     long_description=open("README.rst", "rb").read().decode("utf8"),
     long_description_content_type="text/x-rst",
     license="BSD-2-Clause",
-    keywords="xxtea",
+    keywords="xxteang",
     ext_modules=[extension],
     classifiers=[
         "Development Status :: 5 - Production/Stable",
