@@ -10,7 +10,10 @@ v1.0.0.dev0 2026/08/07
 - Refactor: unify the duplicated module/type argument parsers into one
   table-driven parser, collapse the duplicated ``longs2bytes`` byte-order
   paths, and add a module docstring.
-- Performance: write the tail/padding bytes directly (no buffer pre-
-  zeroing, removing the full-buffer ``memset``), make ``bytes2longs``
-  return ``void``, and drop the redundant keyword-slot tracking in the
-  shared parser.
+- Performance: assemble the tail/padding bytes as endian-independent
+  word values (no buffer pre-zeroing, removing the full-buffer
+  ``memset``), make ``bytes2longs`` return ``void``, and drop the
+  redundant keyword-slot tracking in the shared parser.
+- Fix: ciphertext corruption on big-endian hosts (s390x) for inputs
+  whose length is not a multiple of 4 bytes; the tail bytes are now
+  built as word values instead of raw memory writes.

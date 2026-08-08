@@ -89,8 +89,8 @@ static void bytes2longs(const char *in, Py_ssize_t inlen, uint32_t *out, int pad
 {
     Py_ssize_t i, nwords;
     int pad;
+    uint32_t w;
     const unsigned char *s = (const unsigned char *)in;
-    unsigned char *b = (unsigned char *)out;
 
     /* Fast path: process 4 bytes at a time */
     nwords = inlen >> 2;
@@ -105,20 +105,32 @@ static void bytes2longs(const char *in, Py_ssize_t inlen, uint32_t *out, int pad
     }
 
     /*
-     * Copy the remaining 0-3 bytes, then pad to a multiple of 8 bytes.
-     * Every output byte is written exactly once, so the caller does not
-     * need to zero the buffer first.  Padding to 8 bytes also guarantees
-     * the two 32-bit words (8 bytes) that XXTEA requires, so short
-     * inputs need no extra handling.
+     * Complete the final partial word: the remaining 0-3 data bytes,
+     * then padding to a multiple of 8 bytes.  Words are assembled as
+     * integer values like the fast path above, so the byte order is
+     * correct on both little- and big-endian hosts.  Each tail word is
+     * stored only once all four of its bytes are known, so the caller
+     * does not need to zero the buffer first.  Padding to 8 bytes also
+     * guarantees the two 32-bit words (8 bytes) that XXTEA requires,
+     * so short inputs need no extra handling.
      */
     i = nwords << 2;
+    w = 0;
     for (; i < inlen; i++) {
-        b[i] = s[i];
+        w |= (uint32_t)s[i] << ((i & 3) << 3);
+        if ((i & 3) == 3) {
+            out[i >> 2] = w;
+            w = 0;
+        }
     }
     if (padding) {
         pad = 8 - (inlen & 7);
         for (; i < inlen + pad; i++) {
-            b[i] = (unsigned char)pad;
+            w |= (uint32_t)pad << ((i & 3) << 3);
+            if ((i & 3) == 3) {
+                out[i >> 2] = w;
+                w = 0;
+            }
         }
     }
 }
