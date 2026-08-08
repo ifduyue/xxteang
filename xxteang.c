@@ -105,32 +105,30 @@ static void bytes2longs(const char *in, Py_ssize_t inlen, uint32_t *out, int pad
     }
 
     /*
-     * Complete the final partial word: the remaining 0-3 data bytes,
-     * then padding to a multiple of 8 bytes.  Words are assembled as
-     * integer values like the fast path above, so the byte order is
-     * correct on both little- and big-endian hosts.  Each tail word is
-     * stored only once all four of its bytes are known, so the caller
-     * does not need to zero the buffer first.  Padding to 8 bytes also
-     * guarantees the two 32-bit words (8 bytes) that XXTEA requires,
-     * so short inputs need no extra handling.
+     * Complete the final partial word with the remaining 0-3 data bytes,
+     * then pad to a multiple of 8 bytes.  Word values are assembled like
+     * the fast path above, so the byte order is correct on every host.
+     * Padding rounds the length up to an even number of words: the final
+     * word mixes data and pad bytes, and a whole extra pad word is added
+     * unless the length is 4 mod 8.  A fully-padded word has the value
+     * pad * 0x01010101.  Every tail word is assigned completely, so the
+     * caller does not need to zero the buffer first.
      */
     i = nwords << 2;
     w = 0;
-    for (; i < inlen; i++) {
-        w |= (uint32_t)s[i] << ((i & 3) << 3);
-        if ((i & 3) == 3) {
-            out[i >> 2] = w;
-            w = 0;
-        }
+    for (int shift = 0; i < inlen; i++, shift += 8) {
+        w |= (uint32_t)s[i] << shift;
     }
     if (padding) {
+        int r = (int)(inlen & 3);
+        uint32_t pw;
         pad = 8 - (inlen & 7);
-        for (; i < inlen + pad; i++) {
-            w |= (uint32_t)pad << ((i & 3) << 3);
-            if ((i & 3) == 3) {
-                out[i >> 2] = w;
-                w = 0;
-            }
+        pw = (uint32_t)pad * 0x01010101u;
+        /* Keep only the pad byte positions r..3 of pw. */
+        w |= pw & (~0u << (8 * r));
+        out[nwords] = w;
+        if ((inlen & 4) == 0) {
+            out[nwords + 1] = pw;
         }
     }
 }
