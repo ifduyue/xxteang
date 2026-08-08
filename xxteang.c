@@ -352,6 +352,22 @@ _call_one_arg(PyObject *func, PyObject *arg)
     return PyObject_CallOneArg(func, arg);
 }
 
+/* Apply the cached binascii.hexlify to `obj`, consuming the reference. */
+static inline PyObject *
+_hexlify(xxteang_mod_state *state, PyObject *obj)
+{
+    PyObject *retval = _call_one_arg(state ? state->binascii_hexlify : NULL, obj);
+    Py_DECREF(obj);
+    return retval;
+}
+
+/* Apply the cached binascii.unhexlify to `obj`, returning a new bytes. */
+static inline PyObject *
+_unhexlify(xxteang_mod_state *state, PyObject *obj)
+{
+    return _call_one_arg(state ? state->binascii_unhexlify : NULL, obj);
+}
+
 /* Validate the key buffer length. Returns 0 on success, -1 on error. */
 static inline int
 _check_key_length(const Py_buffer *key)
@@ -441,7 +457,7 @@ _encrypt_impl(const char *data_buf, Py_ssize_t data_len,
         return NULL;
     }
 
-    uint32_t *d = (uint32_t *)PyBytes_AsString(retval);
+    uint32_t *d = (uint32_t *)PyBytes_AS_STRING(retval);
 
     Py_BEGIN_ALLOW_THREADS
     bytes2longs(data_buf, data_len, d, padding);
@@ -490,7 +506,7 @@ _decrypt_impl(const char *data_buf, Py_ssize_t data_len,
         return NULL;
     }
 
-    char *retbuf = PyBytes_AsString(retval);
+    char *retbuf = PyBytes_AS_STRING(retval);
     Py_ssize_t rc;
     Py_BEGIN_ALLOW_THREADS
     bytes2longs(data_buf, data_len, (uint32_t *)retbuf, 0);
@@ -542,9 +558,7 @@ xxteang_encrypt_hex(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyO
         return NULL;
 
     xxteang_mod_state *state = (xxteang_mod_state*)PyModule_GetState(self);
-    PyObject *retval = _call_one_arg(state ? state->binascii_hexlify : NULL, tmp);
-    Py_DECREF(tmp);
-    return retval;
+    return _hexlify(state, tmp);
 }
 
 
@@ -578,7 +592,7 @@ xxteang_decrypt_hex(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyO
         return NULL;
 
     xxteang_mod_state *state = (xxteang_mod_state*)PyModule_GetState(self);
-    PyObject *tmp = _call_one_arg(state ? state->binascii_unhexlify : NULL, data_obj);
+    PyObject *tmp = _unhexlify(state, data_obj);
     if (!tmp)
         return NULL;
 
@@ -783,17 +797,13 @@ xxteang_object_encrypt_hex(xxteang_object *self, PyObject *data)
     if (!tmp)
         return NULL;
 
-    xxteang_mod_state *state = PyType_GetModuleState(Py_TYPE(self));
-    PyObject *retval = _call_one_arg(state ? state->binascii_hexlify : NULL, tmp);
-    Py_DECREF(tmp);
-    return retval;
+    return _hexlify(PyType_GetModuleState(Py_TYPE(self)), tmp);
 }
 
 static PyObject *
 xxteang_object_decrypt_hex(xxteang_object *self, PyObject *data)
 {
-    xxteang_mod_state *state = PyType_GetModuleState(Py_TYPE(self));
-    PyObject *tmp = _call_one_arg(state ? state->binascii_unhexlify : NULL, data);
+    PyObject *tmp = _unhexlify(PyType_GetModuleState(Py_TYPE(self)), data);
     if (!tmp)
         return NULL;
 

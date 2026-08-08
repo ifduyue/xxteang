@@ -1,9 +1,15 @@
+import ast
 from setuptools import setup, Extension
 
 with open("xxteang.c") as f:
+    VERSION = None
     for line in f:
         if line.startswith("#define VERSION "):
-            VERSION = eval(line.rsplit(None, 1)[-1])
+            VERSION = ast.literal_eval(line.rsplit(None, 1)[-1])
+            break
+
+if VERSION is None:
+    raise SystemExit("VERSION macro not found in xxteang.c")
 
 extension = Extension("xxteang", ["xxteang.c"])
 
