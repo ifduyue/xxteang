@@ -1,7 +1,7 @@
 CHANGELOG
 --------------
 
-v1.0.0.dev0 2026/08/07
+v1.0.0 2026/08/08
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 - Rename the project from ``xxtea`` to ``xxteang``.
@@ -14,6 +14,3 @@ v1.0.0.dev0 2026/08/07
   word values (no buffer pre-zeroing, removing the full-buffer
   ``memset``), make ``bytes2longs`` return ``void``, and drop the
   redundant keyword-slot tracking in the shared parser.
-- Fix: ciphertext corruption on big-endian hosts (s390x) for inputs
-  whose length is not a multiple of 4 bytes; the tail bytes are now
-  built as word values instead of raw memory writes.
