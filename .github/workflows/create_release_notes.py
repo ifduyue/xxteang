@@ -14,7 +14,8 @@ versions = re.findall(r'^(v[\d.]+) [\d/]+$', text, re.MULTILINE)
 
 # Find current version's section
 escaped = re.escape(tag)
-pattern = r'^' + escaped + r'.*?(?=^v[\d.]+ [\d/]+|\Z)'
+# Negative lookahead so "v1.0.1" does not match a "v1.0.1.dev0" heading.
+pattern = r'^' + escaped + r'(?![\.\d])' + r'.*?(?=^v[\d.]+ [\d/]+|\Z)'
 m = re.search(pattern, text, re.MULTILINE | re.DOTALL)
 if m:
     notes = m.group(0).strip()
