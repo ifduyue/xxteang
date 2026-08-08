@@ -43,8 +43,6 @@ class TestXXTEA(unittest.TestCase):
     def test_zero_bytes(self):
         for i in range(2048):
             data = b'\0' * i
-
-
             key = os.urandom(16)
             enc = xxteang.encrypt(data, key)
             dec = xxteang.decrypt(enc, key)
@@ -147,30 +145,42 @@ class TestXXTEA(unittest.TestCase):
             self.assertEqual(binascii.b2a_hex(enc), hexenc)
 
     def test_decrypt_invalid(self):
-        def f1():
-            for i in range(1024):
-                key = os.urandom(16)
-                data = os.urandom(i * 8)
+        """Invalid padding is rejected deterministically.
 
-                xxteang.decrypt(data, key=key)
+        Encrypt with padding=False a plaintext whose last bytes are a
+        known-bad pad value, then decrypt with padding=True: the round-
+        trip restores the exact plaintext, so the padding check sees
+        precisely the crafted value.  (Random data would only fail with
+        probability ~1/256, since XXTEA is a permutation and a random
+        plaintext's last byte is a plausible pad value that often.)"""
+        key = os.urandom(16)
+        data = bytearray(os.urandom(32))
 
-        def f2():
-            for i in range(1024):
-                key = os.urandom(16)
-                data = os.urandom(i * 8)
+        # pad = 0: never a legal PKCS#7 pad value
+        data[-1] = 0x00
+        enc = xxteang.encrypt(bytes(data), key, padding=False)
+        with self.assertRaises(ValueError):
+            xxteang.decrypt(enc, key)
 
-                xxteang.decrypt(data, key=key, padding=True)
+        # pad = 9: larger than the 8-byte block
+        data[-1] = 0x09
+        enc = xxteang.encrypt(bytes(data), key, padding=False)
+        with self.assertRaises(ValueError):
+            xxteang.decrypt(enc, key)
 
-        def f3():
-            for i in range(1024):
-                key = os.urandom(16)
-                data = os.urandom(i * 8)
+        # pad = 2 but the byte before it is not 0x02
+        data[-2], data[-1] = 0x00, 0x02
+        enc = xxteang.encrypt(bytes(data), key, padding=False)
+        with self.assertRaises(ValueError):
+            xxteang.decrypt(enc, key)
 
-                xxteang.decrypt(data, key=key, padding=False)
-
-        self.assertRaises(ValueError, f1)
-        self.assertRaises(ValueError, f2)
-        self.assertRaises(ValueError, f3)
+        # padding=False: no integrity check, decrypt succeeds; only the
+        # ciphertext length requirement (>= 8 bytes, multiple of 4) raises
+        enc = xxteang.encrypt(os.urandom(32), key, padding=False)
+        xxteang.decrypt(enc, key, padding=False)
+        for length in (0, 1, 4, 6, 7, 9):
+            with self.assertRaises(ValueError):
+                xxteang.decrypt(os.urandom(length), key, padding=False)
 
 
 class TestLargeData(unittest.TestCase):
@@ -635,7 +645,6 @@ class TestXXTEAType(unittest.TestCase):
         with self.assertRaises(TypeError):
             xxteang.XXTEA(self.key, rounds='not-an-int')
 
-
     # ── hex methods ─────────────────────────────────────────────────────
 
     def test_encrypt_hex(self):
@@ -661,6 +670,15 @@ class TestXXTEAType(unittest.TestCase):
         self.assertEqual(cipher.decrypt_hex(hexenc),
                          xxteang.decrypt_hex(hexenc, key))
 
+    def test_decrypt_hex_invalid(self):
+        """Non-hex digits and odd-length hex strings are rejected."""
+        with self.assertRaises(binascii.Error):
+            xxteang.decrypt_hex(b'zz', os.urandom(16))
+        with self.assertRaises(binascii.Error):
+            xxteang.decrypt_hex(b'abc', os.urandom(16))
+        with self.assertRaises(binascii.Error):
+            self.cipher.decrypt_hex(b'zz')
+
     # ── padding at construction ──────────────────────────────────────────
 
     def test_padding_construction(self):
@@ -668,6 +686,31 @@ class TestXXTEAType(unittest.TestCase):
         for padding in (True, False):
             cipher = xxteang.XXTEA(key, padding=padding)
             self.assertEqual(cipher.decrypt(cipher.encrypt(b'12345678')), b'12345678')
+
+
+class TestBytesLikeInputs(unittest.TestCase):
+    """The buffer protocol (PyBUF_SIMPLE) accepts bytes-like objects
+    for both data and key."""
+
+    def test_module_functions(self):
+        key = os.urandom(16)
+        data = os.urandom(32)
+        for data_buf in (bytearray(data), memoryview(data)):
+            for key_buf in (bytearray(key), memoryview(key)):
+                enc = xxteang.encrypt(data_buf, key_buf)
+                self.assertEqual(xxteang.decrypt(enc, key), data)
+                hexenc = xxteang.encrypt_hex(data_buf, key_buf)
+                self.assertEqual(xxteang.decrypt_hex(hexenc, key), data)
+
+    def test_type_methods(self):
+        key = os.urandom(16)
+        data = os.urandom(32)
+        cipher = xxteang.XXTEA(bytearray(key))
+        for data_buf in (bytearray(data), memoryview(data)):
+            enc = cipher.encrypt(data_buf)
+            self.assertEqual(cipher.decrypt(enc), data)
+            hexenc = cipher.encrypt_hex(data_buf)
+            self.assertEqual(cipher.decrypt_hex(hexenc), data)
 
 
 if __name__ == '__main__':

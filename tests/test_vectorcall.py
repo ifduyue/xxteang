@@ -64,6 +64,30 @@ class TestVectorcall(unittest.TestCase):
         c = xxteang.XXTEA(b'0123456789abcdef', padding=True)
         self.assertEqual(c.encrypt(b'12345678'), xxteang.encrypt(b'12345678', b'0123456789abcdef'))
 
+    # ── legacy tp_init path (direct __init__ calls) ──────────────────
+
+    def test_legacy_init_positional(self):
+        c = xxteang.XXTEA.__new__(xxteang.XXTEA)
+        xxteang.XXTEA.__init__(c, b'0123456789abcdef')
+        self.assertEqual(c.encrypt(b'a'), xxteang.encrypt(b'a', b'0123456789abcdef'))
+
+    def test_legacy_init_keywords(self):
+        c = xxteang.XXTEA.__new__(xxteang.XXTEA)
+        xxteang.XXTEA.__init__(c, key=b'0123456789abcdef', padding=False, rounds=16)
+        self.assertEqual(c.encrypt(b'12345678'),
+                         xxteang.encrypt(b'12345678', b'0123456789abcdef', False, 16))
+
+    def test_legacy_init_errors(self):
+        c = xxteang.XXTEA.__new__(xxteang.XXTEA)
+        with self.assertRaises(TypeError):  # too many arguments
+            xxteang.XXTEA.__init__(c, b'0123456789abcdef', True, 32, 'extra')
+        with self.assertRaises(TypeError):  # duplicate key
+            xxteang.XXTEA.__init__(c, b'0123456789abcdef', key=b'0123456789abcdef')
+        with self.assertRaises(TypeError):  # missing key
+            xxteang.XXTEA.__init__(c)
+        with self.assertRaises(ValueError):  # short key
+            xxteang.XXTEA.__init__(c, b'short')
+
 
 if __name__ == '__main__':
     unittest.main()
