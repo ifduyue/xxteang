@@ -443,21 +443,35 @@ _encrypt_impl(const char *data_buf, Py_ssize_t data_len,
         return _raise_bad_length();
     }
 
-    /* 8-byte PKCS#7 padding rounds up to a multiple of 8 bytes
-     * (i.e. an even number of 32-bit words), so the word count is
-     * ((data_len >> 3) + 1) * 2. */
-    Py_ssize_t alen = padding ? ((data_len >> 3) + 1) * 2 : (data_len >> 2);
-    if (alen > INT_MAX) {
+    /* Size the output first so overflow is checked on the actual
+     * allocation, not reconstructed from a word count * 4.
+     * PKCS#7 always adds 1–8 bytes (next multiple of 8). */
+    Py_ssize_t out_size;
+    if (padding) {
+        if (data_len > PY_SSIZE_T_MAX - 8) {
+            PyErr_SetString(PyExc_OverflowError, "data too large");
+            return NULL;
+        }
+        out_size = (data_len & ~(Py_ssize_t)7) + 8;
+    }
+    else {
+        out_size = data_len;
+    }
+
+    /* btea() takes the word count as int; divide rather than
+     * INT_MAX * 4, which overflows 32-bit signed arithmetic. */
+    if (out_size / 4 > INT_MAX) {
         PyErr_SetString(PyExc_OverflowError, "data too large");
         return NULL;
     }
 
-    PyObject *retval = PyBytes_FromStringAndSize(NULL, alen << 2);
+    PyObject *retval = PyBytes_FromStringAndSize(NULL, out_size);
     if (!retval) {
         return NULL;
     }
 
     uint32_t *d = (uint32_t *)PyBytes_AS_STRING(retval);
+    Py_ssize_t alen = out_size / 4;
 
     Py_BEGIN_ALLOW_THREADS
     bytes2longs(data_buf, data_len, d, padding);
