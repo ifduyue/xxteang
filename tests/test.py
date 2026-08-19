@@ -1,5 +1,7 @@
 import os
 import binascii
+import ctypes
+import sys
 
 import unittest
 import xxteang
@@ -211,6 +213,82 @@ class TestLargeData(unittest.TestCase):
         dec = xxteang.decrypt(enc, key, padding=False)
         self.assertEqual(len(dec), len(data))
         self.assertEqual(dec, data)
+
+
+class TestSizeOverflow(unittest.TestCase):
+    """Overflow guards on output sizing, without committing RAM for the payload.
+
+    ctypes exports a contiguous buffer of the requested length backed by a
+    single byte.  _encrypt_impl / _decrypt_impl check data_len before reading
+    the input or allocating the ciphertext, so the backing byte is never
+    indexed.  Do not test the just-under-limit path: that would still try to
+    allocate ~8 GiB (64-bit) or ~2 GiB (32-bit) of output.
+    """
+
+    @staticmethod
+    def _buffer(nbytes):
+        try:
+            backing = ctypes.c_char()
+            buf = (ctypes.c_char * nbytes).from_address(ctypes.addressof(backing))
+        except (OverflowError, MemoryError, ValueError, TypeError) as e:
+            raise unittest.SkipTest(
+                'cannot construct %d-byte buffer view: %s' % (nbytes, e))
+        buf._keepalive = backing
+        return buf
+
+    def test_btea_word_count_overflow(self):
+        """out_size/4 > INT_MAX is reachable when Py_ssize_t is 64-bit (~8 GiB)."""
+        if sys.maxsize <= 2 ** 32:
+            self.skipTest('32-bit: word count cannot exceed INT_MAX')
+
+        int_max = 2 ** (ctypes.sizeof(ctypes.c_int) * 8 - 1) - 1
+        too_big = (int_max + 1) * 4
+        buf = self._buffer(too_big)
+        key = os.urandom(16)
+
+        with self.assertRaises(OverflowError) as cm:
+            xxteang.encrypt(buf, key)
+        self.assertIn('data too large', str(cm.exception))
+        with self.assertRaises(OverflowError):
+            xxteang.encrypt(buf, key, padding=False)
+        with self.assertRaises(OverflowError):
+            xxteang.encrypt_hex(buf, key)
+        with self.assertRaises(OverflowError):
+            xxteang.decrypt(buf, key)
+        with self.assertRaises(OverflowError):
+            xxteang.XXTEA(key).encrypt(buf)
+
+    def test_padded_encrypt_overflow_at_int_max_words(self):
+        """Padding pushes a just-under-8GiB input over the btea word-count limit."""
+        if sys.maxsize <= 2 ** 32:
+            self.skipTest('32-bit: word count cannot exceed INT_MAX')
+
+        int_max = 2 ** (ctypes.sizeof(ctypes.c_int) * 8 - 1) - 1
+        # out_size = (len & ~7) + 8; this is the smallest len with out_size/4 > INT_MAX
+        too_big = (int_max + 1) * 4 - 8
+        buf = self._buffer(too_big)
+        key = os.urandom(16)
+
+        with self.assertRaises(OverflowError) as cm:
+            xxteang.encrypt(buf, key)
+        self.assertIn('data too large', str(cm.exception))
+        # padding=False still fits in INT_MAX words and would allocate ~8 GiB.
+
+    def test_padded_size_overflow_32bit(self):
+        """data_len > PY_SSIZE_T_MAX - 8 is only reachable on 32-bit Py_ssize_t."""
+        if sys.maxsize > 2 ** 32:
+            self.skipTest('64-bit: PY_SSIZE_T_MAX - 8 is not reachable')
+
+        buf = self._buffer(sys.maxsize - 7)
+        key = os.urandom(16)
+
+        with self.assertRaises(OverflowError) as cm:
+            xxteang.encrypt(buf, key)
+        self.assertIn('data too large', str(cm.exception))
+        with self.assertRaises(OverflowError):
+            xxteang.encrypt_hex(buf, key)
+        with self.assertRaises(OverflowError):
+            xxteang.XXTEA(key).encrypt(buf)
 
 
 class TestArgPassing(unittest.TestCase):
