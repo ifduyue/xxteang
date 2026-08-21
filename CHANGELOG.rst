@@ -1,6 +1,16 @@
 CHANGELOG
 --------------
 
+v1.0.1 2026/08/21
+~~~~~~~~~~~~~~~~~~~~~~~
+
+- Fix 32-bit overflow when sizing padded encrypt output: compute the
+  ciphertext byte length first and reject inputs that cannot fit in
+  ``Py_ssize_t`` or in btea's ``int`` word count.
+- Tests: cover buffer-protocol inputs, legacy ``XXTEA.__init__``,
+  deterministic padding errors, and encrypt output size overflow guards.
+- CI: pin GitHub Actions to commit SHAs; bump cibuildwheel to v4.2.0.
+
 v1.0.0 2026/08/08
 ~~~~~~~~~~~~~~~~~~~~~~~
 
