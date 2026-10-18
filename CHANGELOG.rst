@@ -1,6 +1,12 @@
 CHANGELOG
 --------------
 
+v1.0.2 2026/10/18
+~~~~~~~~~~~~~~~~~~~~~~~
+
+- Build wheels with cibuildwheel 4.3.1.
+- Add the Python 3.15 classifier.
+
 v1.0.1 2026/08/21
 ~~~~~~~~~~~~~~~~~~~~~~~
 
