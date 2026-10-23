@@ -33,6 +33,29 @@
 
 #define DELTA 0x9e3779b9U
 #define MX (((z>>5^y<<2) + (y>>3^z<<4)) ^ ((sum^y) + (key[(p&3)^e] ^ z)))
+/* One round visits every word.  Release the GIL once that exceeds a
+ * 64 KiB block at the default 6 rounds, so a large explicit rounds on
+ * a short buffer does not stall other threads. */
+#define XXTEANG_GIL_MIN_WORK (6ull * (65536 / 4))
+
+static inline unsigned
+xxteang_round_count(unsigned int rounds, int nwords)
+{
+    return rounds == 0 ? (unsigned)(6 + 52 / nwords) : rounds;
+}
+
+static inline int
+xxteang_release_gil(unsigned int rounds, Py_ssize_t nwords)
+{
+    unsigned long long work;
+
+    if (nwords < 2) {
+        return 0;
+    }
+    work = (unsigned long long)xxteang_round_count(rounds, (int)nwords)
+         * (unsigned long long)nwords;
+    return work > XXTEANG_GIL_MIN_WORK;
+}
 
 typedef struct xxteang_mod_state {
     PyObject *binascii_hexlify;
@@ -45,7 +68,7 @@ static inline void btea(uint32_t *v, int n, uint32_t const key[4], unsigned int 
     unsigned p, e;
 
     if (n > 1) {          /* Coding Part */
-        rounds = rounds == 0 ? (unsigned)(6 + 52 / n) : rounds;
+        rounds = xxteang_round_count(rounds, n);
         sum = 0;
         z = v[n - 1];
 
@@ -65,7 +88,7 @@ static inline void btea(uint32_t *v, int n, uint32_t const key[4], unsigned int 
     }
     else if (n < -1) {    /* Decoding Part */
         n = -n;
-        rounds = rounds == 0 ? (unsigned)(6 + 52 / n) : rounds;
+        rounds = xxteang_round_count(rounds, n);
         sum = (uint32_t)(rounds * DELTA);
         y = v[0];
 
@@ -427,6 +450,42 @@ _raise_bad_length(void)
     return NULL;
 }
 
+/* No Python API calls: safe to run without the GIL. */
+static void
+encrypt_words(uint32_t *d, Py_ssize_t alen, const char *data_buf,
+              Py_ssize_t data_len, const char *key_buf, int padding,
+              unsigned int rounds)
+{
+    uint32_t k[4] = {0};
+
+    bytes2longs(data_buf, data_len, d, padding);
+    bytes2longs(key_buf, 16, k, 0);
+    btea(d, (int)alen, k, rounds);
+#if !PY_LITTLE_ENDIAN
+    /*
+     * On a big-endian host the raw uint32_t memory layout in the PyBytes
+     * buffer would be big-endian, but we want the ciphertext to be
+     * little-endian on the wire.  Rewrite the buffer word-by-word as
+     * little-endian bytes (safe because we read each word before writing
+     * its bytes).
+     */
+    longs2bytes(d, alen, (char *)d, 0);
+#endif
+}
+
+static Py_ssize_t
+decrypt_words(uint32_t *d, Py_ssize_t alen, const char *data_buf,
+              Py_ssize_t data_len, const char *key_buf, int padding,
+              unsigned int rounds)
+{
+    uint32_t k[4] = {0};
+
+    bytes2longs(data_buf, data_len, d, 0);
+    bytes2longs(key_buf, 16, k, 0);
+    btea(d, -(int)alen, k, rounds);
+    return longs2bytes(d, alen, (char *)d, padding);
+}
+
 /*
  * Internal encrypt implementation — takes raw buffers, returns PyBytes or NULL.
  *
@@ -437,8 +496,6 @@ static inline PyObject *
 _encrypt_impl(const char *data_buf, Py_ssize_t data_len,
               const char *key_buf, int padding, unsigned int rounds)
 {
-    uint32_t k[4] = {0};
-
     if (!padding && (data_len < 8 || (data_len & 3) != 0)) {
         return _raise_bad_length();
     }
@@ -473,21 +530,14 @@ _encrypt_impl(const char *data_buf, Py_ssize_t data_len,
     uint32_t *d = (uint32_t *)PyBytes_AS_STRING(retval);
     Py_ssize_t alen = out_size / 4;
 
-    Py_BEGIN_ALLOW_THREADS
-    bytes2longs(data_buf, data_len, d, padding);
-    bytes2longs(key_buf, 16, k, 0);
-    btea(d, (int)alen, k, rounds);
-#if !PY_LITTLE_ENDIAN
-    /*
-     * On a big-endian host the raw uint32_t memory layout in the PyBytes
-     * buffer would be big-endian, but we want the ciphertext to be
-     * little-endian on the wire.  Rewrite the buffer word-by-word as
-     * little-endian bytes (safe because we read each word before writing
-     * its bytes).
-     */
-    longs2bytes(d, alen, (char *)d, 0);
-#endif
-    Py_END_ALLOW_THREADS
+    if (xxteang_release_gil(rounds, alen)) {
+        Py_BEGIN_ALLOW_THREADS
+        encrypt_words(d, alen, data_buf, data_len, key_buf, padding, rounds);
+        Py_END_ALLOW_THREADS
+    }
+    else {
+        encrypt_words(d, alen, data_buf, data_len, key_buf, padding, rounds);
+    }
 
     return retval;
 }
@@ -503,8 +553,6 @@ static inline PyObject *
 _decrypt_impl(const char *data_buf, Py_ssize_t data_len,
               const char *key_buf, int padding, unsigned int rounds)
 {
-    uint32_t k[4] = {0};
-
     if ((data_len & 3) != 0 || data_len < 8) {
         return _raise_bad_length();
     }
@@ -520,14 +568,16 @@ _decrypt_impl(const char *data_buf, Py_ssize_t data_len,
         return NULL;
     }
 
-    char *retbuf = PyBytes_AS_STRING(retval);
+    uint32_t *words = (uint32_t *)PyBytes_AS_STRING(retval);
     Py_ssize_t rc;
-    Py_BEGIN_ALLOW_THREADS
-    bytes2longs(data_buf, data_len, (uint32_t *)retbuf, 0);
-    bytes2longs(key_buf, 16, k, 0);
-    btea((uint32_t *)retbuf, -(int)alen, k, rounds);
-    rc = longs2bytes((uint32_t *)retbuf, alen, retbuf, padding);
-    Py_END_ALLOW_THREADS
+    if (xxteang_release_gil(rounds, alen)) {
+        Py_BEGIN_ALLOW_THREADS
+        rc = decrypt_words(words, alen, data_buf, data_len, key_buf, padding, rounds);
+        Py_END_ALLOW_THREADS
+    }
+    else {
+        rc = decrypt_words(words, alen, data_buf, data_len, key_buf, padding, rounds);
+    }
 
     if (padding) {
         if (rc >= 0) {
